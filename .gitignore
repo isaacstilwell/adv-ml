@@ -1,0 +1,6 @@
+/.idea
+tutorial.pdf
+.DS_Store
+/homework/hw2/data/*
+/homework/hw3/data/*
+/homework/hw1/FashionMNIST/*
