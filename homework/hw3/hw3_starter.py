@@ -14,7 +14,12 @@ from hw3_utils import target_pgd_attack, tensor2imgVGG, img2tensorVGG
 from model import VGG, load_dataset
 
 import kornia.augmentation as K
-from jpeg import RandomJPEG
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from kornia.augmentation import random_generator as rg
+from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
+from kornia.core import Tensor
+from kornia.enhance import jpeg_codec_differentiable
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,6 +34,36 @@ class State:
         self.num_samples = None
         self.question = None
         self.eval_set = None
+
+""" 
+    NOTE TO CS 280 GRADER FROM ISAAC: This patch and RandomJPEG are from kornia. 
+    I had to fix thee codec_differentiable function locally to work with CUDA referencing this PR:
+    https://github.com/kornia/kornia/pull/2883
+"""
+
+def patched_jpeg_codec_differentiable(image_rgb, jpeg_quality, **kwargs):
+    d = image_rgb.device
+    jpeg_quality = jpeg_quality.to(d)
+
+    return jpeg_codec_differentiable(image_rgb, jpeg_quality, **kwargs)
+
+class RandomJPEG(IntensityAugmentationBase2D):
+    def __init__(
+        self,
+        jpeg_quality: Union[Tensor, float, Tuple[float, float], List[float]] = 50.0,
+        same_on_batch: bool = False,
+        p: float = 1.0,
+        keepdim: bool = False,
+    ) -> None:
+        super().__init__(p=p, same_on_batch=same_on_batch, keepdim=keepdim)
+        self.jpeg_quality = jpeg_quality
+        self._param_generator = rg.JPEGGenerator(jpeg_quality)
+
+    def apply_transform(
+        self, input: Tensor, params: Dict[str, Tensor], flags: Dict[str, Any], transform: Optional[Tensor] = None
+    ) -> Tensor:
+        jpeg_output: Tensor = jpeg_codec_differentiable(input, params["jpeg_quality"])
+        return jpeg_output
 
 
 state = State()
@@ -74,7 +109,6 @@ def evaluate_transformations():
     Evaluates model accuracy and attack success under transformations
     """
     samples = []
-    # sample_indices = torch.randperm(len(state.test_loader.dataset))[:state.num_samples].tolist()
 
     for idx in state.eval_set:
         image, label = state.test_loader.dataset[idx]
