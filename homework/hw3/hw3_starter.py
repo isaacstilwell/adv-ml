@@ -14,6 +14,7 @@ from hw3_utils import target_pgd_attack, tensor2imgVGG, img2tensorVGG
 from model import VGG, load_dataset
 
 import kornia.augmentation as K
+from jpeg import RandomJPEG
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,21 +22,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class State:
     def __init__(self):
-        self.model = None
+        self.teacher = None
+        self.student = None
         self.test_loader = None
         self.train_loader = None
         self.num_samples = None
         self.question = None
-    def set_model(self, model):
-        self.model = model
-    def set_test_loader(self, test_loader):
-        self.test_loader = test_loader
-    def set_train_loader(self, train_loader):
-        self.train_loader = train_loader
-    def set_num_samples(self, num_samples):
-        self.num_samples = num_samples
-    def set_question(self, question):
-        self.question = question
+        self.eval_set = None
+
 
 state = State()
 # --------- Part 1: Simple Transformations + Evaluation ---------
@@ -45,7 +39,7 @@ def jpeg_compression(x: torch.Tensor) -> torch.Tensor:
     Applies JPEG compression to the input image tensor
     """
     img = tensor2imgVGG(x)
-    jpeg = v2.JPEG(50)
+    jpeg = v2.JPEG(35)
     compressed_img = jpeg(img)
     ten = img2tensorVGG(compressed_img, device)
     return ten
@@ -80,16 +74,16 @@ def evaluate_transformations():
     Evaluates model accuracy and attack success under transformations
     """
     samples = []
-    sample_indices = torch.randperm(len(state.test_loader.dataset))[:state.num_samples].tolist()
+    # sample_indices = torch.randperm(len(state.test_loader.dataset))[:state.num_samples].tolist()
 
-    for idx in sample_indices:
+    for idx in state.eval_set:
         image, label = state.test_loader.dataset[idx]
         possible_targets = list(range(10))
         possible_targets.remove(label)
         ae_label = possible_targets[torch.randint(0, len(possible_targets), (1,)).item()]
         samples.append((image, label, ae_label))
 
-    state.model.eval()
+    state.teacher.eval()
 
     base_benign_correct = 0
     base_ae_correct = 0
@@ -112,9 +106,9 @@ def evaluate_transformations():
         print(".", end="", flush=True)
         image = image.to(device)
         if state.question == 1:
-            ae = img2tensorVGG(target_pgd_attack(tensor2imgVGG(image), ae_label, state.model, device), device)
+            ae = img2tensorVGG(target_pgd_attack(tensor2imgVGG(image), ae_label, state.teacher, device), device)
         else:
-            ae = img2tensorVGG(eot_attack(state.model, image, torch.tensor(ae_label).unsqueeze(0)), device)
+            ae = img2tensorVGG(eot_attack(state.teacher, image, torch.tensor(ae_label).unsqueeze(0)), device)
 
         image = image.unsqueeze(0)
 
@@ -126,14 +120,14 @@ def evaluate_transformations():
         ae_blurred = gaussian_blur(ae)
 
         with torch.no_grad():
-            benign_class = state.model(image).argmax(dim=1).item()
-            ae_class = state.model(ae).argmax(dim=1).item()
-            img_comped_class = state.model(img_comped).argmax(dim=1).item()
-            ae_comped_class = state.model(ae_comped).argmax(dim=1).item()
-            img_resized_class = state.model(img_resized).argmax(dim=1).item()
-            ae_resized_class = state.model(ae_resized).argmax(dim=1).item()
-            img_blurred_class = state.model(img_blurred).argmax(dim=1).item()
-            ae_blurred_class = state.model(ae_blurred).argmax(dim=1).item()
+            benign_class = state.teacher(image).argmax(dim=1).item()
+            ae_class = state.teacher(ae).argmax(dim=1).item()
+            img_comped_class = state.teacher(img_comped).argmax(dim=1).item()
+            ae_comped_class = state.teacher(ae_comped).argmax(dim=1).item()
+            img_resized_class = state.teacher(img_resized).argmax(dim=1).item()
+            ae_resized_class = state.teacher(ae_resized).argmax(dim=1).item()
+            img_blurred_class = state.teacher(img_blurred).argmax(dim=1).item()
+            ae_blurred_class = state.teacher(ae_blurred).argmax(dim=1).item()
 
         if benign_class == label:
             base_benign_correct += 1
@@ -209,7 +203,7 @@ def eot_attack(model: nn.Module, x: torch.Tensor, y_target: torch.Tensor) -> tor
     target_label = y_target.to(device)
     loss_fn = nn.CrossEntropyLoss()
 
-    comp = K.RandomJPEG(jpeg_quality=50)
+    comp = RandomJPEG(jpeg_quality=35)
     resizing = K.RandomResizedCrop(size=(32, 32), scale=(0.25, 0.25), ratio=(1.0, 1.0), p=1.0)
     blur = K.RandomGaussianBlur(kernel_size=(5, 5), sigma=(1.75, 1.75), p=1.0)
 
@@ -271,9 +265,10 @@ def student_VGG(teacher_path: str = "models/vgg16_cifar10_robust.pth", temperatu
     learning_rate = 0.001
     optimizer = torch.optim.Adam(student.parameters(), lr=learning_rate)
 
-    num_epochs = 20
+    num_epochs = 30
     for epoch in range(num_epochs):
         running_loss = 0.0
+        idx = 0
         for images, labels in state.train_loader:
             images, labels = images.to(device), labels.to(device)
 
@@ -282,24 +277,38 @@ def student_VGG(teacher_path: str = "models/vgg16_cifar10_robust.pth", temperatu
                 teacher_logits = teacher(images)
 
             student_logits = student(images)
+            prob = nn.functional.softmax(student_logits)
 
+            softmax = nn.functional.softmax(teacher_logits, dim=1)
+            # print("softmax: ", softmax[0])
             soft_targets = nn.functional.softmax(teacher_logits / temperature, dim=1)
-            soft_prob = nn.functional.log_softmax(student_logits / temperature, dim=1)
+            # if idx % 64 == 0:
+            #     print(f"\nstudent prob: {prob[0].detach().cpu().tolist()}\n"
+            #           f"teacher soft targets: {soft_targets[0].detach().cpu().tolist()}\n"
+            #           f"teacher prob: {softmax[0].detach().cpu().tolist()}\n")
+            # print("softtargets: ", soft_targets[0])
+            soft_prob = nn.functional.log_softmax(student_logits, dim=1)
+
+            stu_prob = nn.functional.softmax(student_logits, dim=1)
 
 
             # loss = -(torch.sum(soft_targets * soft_prob)) / soft_prob.size()[0]
             # loss = torch.sum(soft_targets * (soft_targets.log() - soft_prob)) / soft_prob.size()[0] * (temperature**2)
             # label_loss = nn.functional.cross_entropy(student_logits, labels)
-            distillation_loss = nn.KLDivLoss(reduction='batchmean')(soft_prob, soft_targets) * (temperature * temperature)
-            hard_loss = nn.CrossEntropyLoss()(student_logits, labels)
-            loss = 0.25 * distillation_loss + 0.75 * hard_loss
+            loss = nn.KLDivLoss(reduction='batchmean')(soft_prob, soft_targets) * (temperature * temperature)
+            # hard_loss = nn.CrossEntropyLoss()(student_logits, labels)
+            # loss = nn.functional.cross_entropy(stu_prob, soft_targets)
+            # loss = 0.25 * distillation_loss + 0.75 * hard_loss
 
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item()
+            idx += 1
 
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss / len(state.train_loader)}")
+        # print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss / len(state.train_loader)}")
+        if running_loss / len(state.train_loader) < 0.7:
+            break
 
     torch.save(student.state_dict(), "models/student_VGG.pth")
 # loss = (torch.sum(soft_targets * (soft_targets.log() - soft_prob))
@@ -309,33 +318,45 @@ def evaluate_distillation():
     Evaluates the student model on clean data and under targeted PGD attack
     """
     samples = []
-    sample_indices = torch.randperm(len(state.test_loader.dataset))[:state.num_samples].tolist()
+    # sample_indices = torch.randperm(len(state.test_loader.dataset))[:state.num_samples].tolist()
 
-    for idx in sample_indices:
+    for idx in state.eval_set:
         image, label = state.test_loader.dataset[idx]
         possible_targets = list(range(10))
         possible_targets.remove(label)
         ae_label = possible_targets[torch.randint(0, len(possible_targets), (1,)).item()]
         samples.append((image, label, ae_label))
 
-    state.model.eval()
+    state.student.eval()
 
+    teacher_correct = 0
     clean_correct = 0
     ae_correct = 0
     ae_success = 0
 
-    for image, label, ae_label in samples:
-        print(".", end="", flush=True)
+    for i, (image, label, ae_label) in enumerate(samples):
         image = image.to(device)
-        ae = img2tensorVGG(target_pgd_attack(tensor2imgVGG(image), ae_label, state.model, device), device)
+        ae = img2tensorVGG(target_pgd_attack(tensor2imgVGG(image), ae_label, state.student, device), device)
         image = image.unsqueeze(0)
 
         with torch.no_grad():
-            clean_class = state.model(image).argmax(dim=1).item()
-            ae_class = state.model(ae).argmax(dim=1).item()
+            if i == 0:
+                student_image_softmax = nn.functional.softmax(state.student(image))
+                student_ae_softmax = nn.functional.softmax(state.student(ae))
+                teacher_image_softmax = nn.functional.softmax(state.teacher(image))
+                teacher_ae_softmax = nn.functional.softmax(state.teacher(ae))
+
+                print(f"stu_image_softmax: {student_image_softmax}\nteacher_image_softmax: {teacher_image_softmax}\nstu_ae_softmax: {student_ae_softmax}\nteacher_ae_softmax: {teacher_ae_softmax}")
+            teacher_clean = state.teacher(image).argmax(dim=1).item()
+            clean_class = state.student(image).argmax(dim=1).item()
+            ae_class = state.student(ae).argmax(dim=1).item()
+
+        print(".", end="", flush=True)
 
         if clean_class == label:
             clean_correct += 1
+        if teacher_clean == label:
+            teacher_correct += 1
         if ae_class == label:
             ae_correct += 1
         elif ae_class == ae_label:
@@ -343,11 +364,12 @@ def evaluate_distillation():
 
     print("\n")
     clean_correct /= (state.num_samples / 100)
+    teacher_correct /= (state.num_samples / 100)
     ae_correct /= (state.num_samples / 100)
     ae_success /= (state.num_samples / 100)
 
     return {
-        "base": [clean_correct, ae_correct, ae_success, ],
+        "dist": [clean_correct, teacher_correct, ae_correct, ae_success, ],
     }
 
 # --------- Bonus Part: Adaptive Attack ---------
@@ -366,21 +388,51 @@ def adaptive_attack(student_model: nn.Module, x: torch.Tensor, y_target: torch.T
     """
     pass
 
+def create_eval_set(size):
+    if size % 10 != 0:
+        raise ValueError("size must be divisible by 10")
+    counts = {}
+    indices = []
+    skip = []
+    print(len(state.test_loader.dataset))
+    for idx, (_, targ) in enumerate(state.test_loader.dataset):
+        if targ in skip:
+            continue
+        counts[targ] = counts.get(targ, 0) + 1
+        indices.append(idx)
+        if counts[targ] == 10:
+            skip.append(targ)
+
+        if len(indices) == size:
+            break
+    print(counts)
+
+    return indices
+
 def output_results(res, part):
     print(f"\n----- PART {part}: Transformations -----")
     print("-" * 60)
-    print(f"{'Defense':<10} | {'Clean Acc':<10} | {'AE Acc':<10} | {'Attack Success':<15}")
+    if part != 3:
+        print(f"{'Defense':<10} | {'Clean Acc':<10} | {'AE Acc':<10} | {'Attack Success':<15}")
+    else:
+        print(f"{'Defense':<10} | {'Student Clean Acc':<20} | {'Teacher Clean Acc':<20} {'Student AE Acc':<15} | {'Attack Success':<15}")
     print("-" * 60)
 
     for defense, metrics in res.items():
-        clean_acc, ae_robust, attack_success = metrics
-        defense_name = {"base": "None", "comp": "JPEG", "resized": "Resize", "blur": "Blur"}[defense]
-        print(
-            f"{defense_name:<10} | {clean_acc:.2f}%{' ':<5} | {ae_robust:.2f}%{' ':<5} | {attack_success:.2f}%{' ':<10}")
+        defense_name = {"base": "None", "comp": "JPEG", "resized": "Resize", "blur": "Blur", "dist": "Distillation"}[defense]
+        if part != 3:
+            clean_acc, ae_robust, attack_success = metrics
+            print(
+                f"{defense_name:<10} | {clean_acc:.2f}%{' ':<5} | {ae_robust:.2f}%{' ':<5} | {attack_success:.2f}%{' ':<10}")
+        else:
+            clean_acc, teacher_acc, ae_robust, attack_success = metrics
+            print(
+                f"{defense_name:<10} | {clean_acc:.2f}%{' ':<5} | {teacher_acc:.2f}%{' ':<5} | {ae_robust:.2f}%{' ':<5} | {attack_success:.2f}%{' ':<10}")
 
 def main():
     # load data
     train_loader, test_loader = load_dataset()
+    num_samples = 100
 
     # use gpu device if possible
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -389,11 +441,13 @@ def main():
     model = VGG('VGG16').to(device)
     model.load_state_dict(torch.load("models/vgg16_cifar10_robust.pth", map_location=device))
 
-    state.model = model
+    state.teacher = model
     state.test_loader = test_loader
     state.train_loader = train_loader
-    state.num_samples = 1
+    state.num_samples = num_samples
     state.question = 1
+    state.eval_set = create_eval_set(num_samples)
+    print(state.eval_set)
 
     # PART 1: Evaluate simple defenses
 
@@ -402,7 +456,7 @@ def main():
     output_results(results, 1)
 
     # PART 2: EOT Attack
-    state.num_samples = 1
+    state.num_samples = num_samples
     state.question = 2
 
     results_eot = evaluate_transformations()
@@ -410,16 +464,17 @@ def main():
     output_results(results_eot, 2)
 
     # PART 3: Distillation Defense
-    student_VGG(temperature=1000)
+    # for i in range(2, 11):
+    student_VGG(temperature=200) # 90, 95
     student = VGG('VGG16').to(device)
     student.load_state_dict(torch.load("models/student_VGG.pth", map_location=device))
 
-    state.model = student
-    state.num_samples = 100
+    state.student = student
+    state.num_samples = num_samples
     state.question = 3
 
     results_dist = evaluate_distillation()
-
+    print(f"-=-=-=-=-{85}=-=-=-=-=-")
     output_results(results_dist, 3)
 
 if __name__ == "__main__":
