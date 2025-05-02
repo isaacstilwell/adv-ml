@@ -526,7 +526,6 @@ def main():
     state.student = student
     state.num_samples = num_samples
     state.question = 3
-    print
 
     results_dist = evaluate_distillation()
     output_results(results_dist, 3)
