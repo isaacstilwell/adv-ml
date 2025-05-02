@@ -13,10 +13,11 @@ import hw3_utils
 from hw3_utils import target_pgd_attack, tensor2imgVGG, img2tensorVGG
 from model import VGG, load_dataset
 
-import kornia.augmentation as K
+import kornia.augmentation as KA
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from kornia.augmentation import random_generator as rg
+import kornia.geometry as KG
 from kornia.augmentation._2d.intensity.base import IntensityAugmentationBase2D
 from kornia.core import Tensor
 from kornia.enhance import jpeg_codec_differentiable
@@ -74,7 +75,7 @@ def jpeg_compression(x: torch.Tensor) -> torch.Tensor:
     Applies JPEG compression to the input image tensor
     """
     img = tensor2imgVGG(x)
-    jpeg = v2.JPEG(35)
+    jpeg = v2.JPEG(28) #32
     compressed_img = jpeg(img)
     ten = img2tensorVGG(compressed_img, device)
     return ten
@@ -85,7 +86,7 @@ def image_resizing(x: torch.Tensor) -> torch.Tensor:
     Applies resizing and rescaling to the input image tensor
     """
     img = tensor2imgVGG(x)
-    resize = v2.Resize(16)
+    resize = v2.Resize(13) #13
     resized_img = resize(img)
 
     restore = v2.Resize(32)
@@ -99,7 +100,7 @@ def gaussian_blur(x: torch.Tensor) -> torch.Tensor:
     Applies Gaussian blur to the input image tensor
     """
     img = tensor2imgVGG(x)
-    blur = v2.GaussianBlur(kernel_size=5, sigma=1.75)
+    blur = v2.GaussianBlur(kernel_size=5, sigma=2)
     blurred_img = blur(img)
     ten = img2tensorVGG(blurred_img, device)
     return ten
@@ -110,11 +111,17 @@ def evaluate_transformations():
     """
     samples = []
 
-    for idx in state.eval_set:
+    # randomly generated ae_labels from commented ae_label code below; saved for consistency in evaluating parameters
+    ae_labels = [7, 5, 4, 4, 7, 0, 8, 5, 9, 9, 1, 3, 9, 4, 8, 6, 9, 8, 2, 5, 1, 7, 3, 5, 0, 5, 5, 1, 2, 1, 4, 7, 7, 8,
+                 1, 1, 1, 8, 1, 4, 2, 8, 9, 2, 1, 1, 4, 7, 5, 8, 4, 0, 8, 6, 4, 1, 9, 0, 5, 0, 5, 0, 4, 5, 5, 6, 9, 9,
+                 9, 1, 6, 6, 8, 3, 8, 1, 3, 3, 6, 2, 0, 2, 6, 8, 8, 9, 0, 1, 2, 5, 1, 0, 9, 1, 0, 4, 8, 6, 4, 0]
+
+    for meta_idx, idx in enumerate(state.eval_set):
         image, label = state.test_loader.dataset[idx]
         possible_targets = list(range(10))
         possible_targets.remove(label)
-        ae_label = possible_targets[torch.randint(0, len(possible_targets), (1,)).item()]
+        # ae_label = possible_targets[torch.randint(0, len(possible_targets), (1,)).item()]
+        ae_label = ae_labels[meta_idx]
         samples.append((image, label, ae_label))
 
     state.teacher.eval()
@@ -238,8 +245,13 @@ def eot_attack(model: nn.Module, x: torch.Tensor, y_target: torch.Tensor) -> tor
     loss_fn = nn.CrossEntropyLoss()
 
     comp = RandomJPEG(jpeg_quality=35)
-    resizing = K.RandomResizedCrop(size=(32, 32), scale=(0.25, 0.25), ratio=(1.0, 1.0), p=1.0)
-    blur = K.RandomGaussianBlur(kernel_size=(5, 5), sigma=(1.75, 1.75), p=1.0)
+    # resizing = KA.RandomResizedCrop(size=(32, 32), scale=(0.25, 0.25), ratio=(1.0, 1.0), p=1.0)
+    resizing = KA.AugmentationSequential(
+        KA.Resize((13, 13)),
+        KA.Resize((32, 32)),
+        same_on_batch=True
+    )
+    blur = KA.RandomGaussianBlur(kernel_size=(5, 5), sigma=(2, 2), p=1.0)
 
     trans = [comp, resizing, blur]
 
@@ -311,9 +323,6 @@ def student_VGG(teacher_path: str = "models/vgg16_cifar10_robust.pth", temperatu
                 teacher_logits = teacher(images)
 
             student_logits = student(images)
-            prob = nn.functional.softmax(student_logits)
-
-            softmax = nn.functional.softmax(teacher_logits, dim=1)
             # print("softmax: ", softmax[0])
             soft_targets = nn.functional.softmax(teacher_logits / temperature, dim=1)
             # if idx % 64 == 0:
@@ -352,14 +361,24 @@ def evaluate_distillation():
     Evaluates the student model on clean data and under targeted PGD attack
     """
     samples = []
-    # sample_indices = torch.randperm(len(state.test_loader.dataset))[:state.num_samples].tolist()
 
-    for idx in state.eval_set:
+    # randomly generated ae_labels from commented ae_label code below; saved for consistency in evaluating parameters
+    ae_labels = [7, 5, 4, 4, 7, 0, 8, 5, 9, 9, 1, 3, 9, 4, 8, 6, 9, 8, 2, 5, 1, 7, 3, 5, 0, 5, 5, 1, 2, 1, 4, 7, 7, 8,
+                 1, 1, 1, 8, 1, 4, 2, 8, 9, 2, 1, 1, 4, 7, 5, 8, 4, 0, 8, 6, 4, 1, 9, 0, 5, 0, 5, 0, 4, 5, 5, 6, 9, 9,
+                 9, 1, 6, 6, 8, 3, 8, 1, 3, 3, 6, 2, 0, 2, 6, 8, 8, 9, 0, 1, 2, 5, 1, 0, 9, 1, 0, 4, 8, 6, 4, 0]
+
+    for meta_idx, idx in enumerate(state.eval_set):
         image, label = state.test_loader.dataset[idx]
         possible_targets = list(range(10))
         possible_targets.remove(label)
-        ae_label = possible_targets[torch.randint(0, len(possible_targets), (1,)).item()]
+        # ae_label = possible_targets[torch.randint(0, len(possible_targets), (1,)).item()]
+        ae_label = ae_labels[meta_idx]
         samples.append((image, label, ae_label))
+    print("[", end="", flush=True)
+    for _, l, a in samples:
+        print(f"({l, a}),", end="", flush=True)
+    print("]", end="", flush=True)
+    print("")
 
     state.student.eval()
 
@@ -498,17 +517,18 @@ def main():
     output_results(results_eot, 2)
 
     # PART 3: Distillation Defense
-    # for i in range(2, 11):
-    student_VGG(temperature=200) # 90, 95
+    # for i in range(75):
+
+    # student_VGG(temperature=90) # 90, 95
     student = VGG('VGG16').to(device)
     student.load_state_dict(torch.load("models/student_VGG.pth", map_location=device))
 
     state.student = student
     state.num_samples = num_samples
     state.question = 3
+    print
 
     results_dist = evaluate_distillation()
-    print(f"-=-=-=-=-{85}=-=-=-=-=-")
     output_results(results_dist, 3)
 
 if __name__ == "__main__":
