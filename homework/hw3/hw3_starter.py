@@ -37,9 +37,9 @@ class State:
         self.eval_set = None
 
 """ 
-    NOTE TO CS 280 GRADER FROM ISAAC: This patch and RandomJPEG are from kornia. 
-    I had to fix thee codec_differentiable function locally to work with CUDA referencing this PR:
-    https://github.com/kornia/kornia/pull/2883
+This patch and RandomJPEG are from kornia. 
+I had to fix thee codec_differentiable function locally to work with CUDA referencing this PR:
+https://github.com/kornia/kornia/pull/2883
 """
 
 def patched_jpeg_codec_differentiable(image_rgb, jpeg_quality, **kwargs):
